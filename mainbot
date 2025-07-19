@@ -16,6 +16,8 @@ from collections import deque
 from typing import Deque
 from datetime import datetime
 from functools import lru_cache
+import signal
+import sys
 
 # Настройка логирования с ротацией логов (новое)
 log_formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
@@ -355,15 +357,57 @@ async def init_spam_client():
 async def main():
     print("Бот запущен...")
     
+    # Создаем событие для корректного завершения
+    shutdown_event = asyncio.Event()
+    
+    # Обработчик сигналов для корректного завершения
+    def signal_handler(signum, frame):
+        print(f"\nПолучен сигнал {signum}. Завершаем работу...")
+        shutdown_event.set()
+    
+    # Устанавливаем обработчики сигналов
+    signal.signal(signal.SIGINT, signal_handler)
+    signal.signal(signal.SIGTERM, signal_handler)
+    
     # Инициализируем spam client перед запуском бота
     await init_spam_client()
     
     # Запускаем фоновую задачу обновления кэша
-    asyncio.create_task(refresh_cache())
+    cache_task = asyncio.create_task(refresh_cache())
     
     # Запускаем бота
     await app.start()
-    await app.idle()
+    
+    print("Бот готов к работе! Нажмите Ctrl+C для завершения.")
+    
+    try:
+        # Ожидаем сигнал завершения
+        await shutdown_event.wait()
+    except KeyboardInterrupt:
+        print("Получен KeyboardInterrupt...")
+    finally:
+        print("Завершаем работу бота...")
+        
+        # Останавливаем спам, если он активен
+        global is_spamming, spam_task
+        if is_spamming and spam_task:
+            is_spamming = False
+            spam_task.cancel()
+            try:
+                await spam_task
+            except asyncio.CancelledError:
+                pass
+        
+        # Корректно завершаем фоновую задачу кэша
+        cache_task.cancel()
+        try:
+            await cache_task
+        except asyncio.CancelledError:
+            pass
+        
+        # Останавливаем бота
+        await app.stop()
+        print("Бот остановлен.")
 
 if __name__ == "__main__":
     asyncio.run(main())
