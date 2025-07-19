@@ -9,6 +9,7 @@ from pyrogram.types import (
 )
 from spam_client import SpamClient
 import asyncio
+import signal
 from telethon import TelegramClient
 from telethon.errors import FloodWaitError
 import time
@@ -46,10 +47,18 @@ async def get_cached_chats(spam):
 
 # Фоновая задача для обновления кэша каждые 5 минут
 async def refresh_cache():
+    # Ждем 30 секунд перед первым обновлением кэша
+    await asyncio.sleep(30)
+    
     while True:
-        async with SpamClient(SPAM_SESSION, SPAM_API_ID, SPAM_API_HASH) as spam:
-            get_cached_chats.cache_clear()  # Очистка старого кэша
-            await get_cached_chats(spam)      # Обновление кэша
+        try:
+            async with SpamClient(SPAM_SESSION, SPAM_API_ID, SPAM_API_HASH) as spam:
+                get_cached_chats.cache_clear()  # Очистка старого кэша
+                await get_cached_chats(spam)      # Обновление кэша
+                print("Кэш чатов обновлен успешно")
+        except Exception as e:
+            print(f"Ошибка при обновлении кэша: {e}")
+        
         await asyncio.sleep(300)  # Обновляем кэш каждые 5 минут
 
 # Logging is already configured above with TimedRotatingFileHandler
@@ -349,11 +358,18 @@ async def handle_error(error: Exception, message: Message):
         logger.error(f"Ошибка при отправке сообщения: {ex}")
 
 async def init_spam_client():
-    async with SpamClient(SPAM_SESSION, SPAM_API_ID, SPAM_API_HASH) as _:
-        print("Рассыльный аккаунт авторизован!")
+    try:
+        async with SpamClient(SPAM_SESSION, SPAM_API_ID, SPAM_API_HASH) as _:
+            print("Рассыльный аккаунт авторизован!")
+    except Exception as e:
+        print(f"Ошибка при инициализации spam клиента: {e}")
+        # Не прерываем выполнение, так как основной бот может работать без spam клиента
 
 async def main():
+    global app
     print("Бот запущен...")
+    print(f"Тип объекта app в начале main(): {type(app)}")
+    print(f"Есть ли метод idle(): {hasattr(app, 'idle')}")
     
     # Инициализируем spam client перед запуском бота
     await init_spam_client()
@@ -362,8 +378,44 @@ async def main():
     asyncio.create_task(refresh_cache())
     
     # Запускаем бота
-    await app.start()
-    await app.idle()
+    try:
+        await app.start()
+        print("Pyrogram бот запущен успешно!")
+        print("Бот готов к работе. Нажмите Ctrl+C для остановки.")
+        
+        # В Pyrogram 2.x нет метода idle(), используем Event для ожидания
+        stop_event = asyncio.Event()
+        
+        # Обработчик для graceful shutdown
+        def signal_handler(signum, frame):
+            print(f"\nПолучен сигнал {signum}. Останавливаем бота...")
+            stop_event.set()
+        
+        # Регистрируем обработчики сигналов
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGTERM, signal_handler)
+        
+        # Ожидаем сигнала остановки
+        print("Бот работает. Для остановки нажмите Ctrl+C")
+        await stop_event.wait()
+            
+    except KeyboardInterrupt:
+        print("\nПолучен сигнал остановки. Завершаем работу...")
+    except Exception as e:
+        print(f"Ошибка при запуске бота: {e}")
+        print(f"Тип объекта app: {type(app)}")
+        if hasattr(app, 'idle'):
+            print("Метод idle() доступен")
+        else:
+            print("Метод idle() НЕ доступен - это нормально для Pyrogram 2.x")
+        raise
+    finally:
+        try:
+            if app.is_connected:
+                await app.stop()
+                print("Бот остановлен.")
+        except Exception as e:
+            print(f"Ошибка при остановке бота: {e}")
 
 if __name__ == "__main__":
     asyncio.run(main())
