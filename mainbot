@@ -52,12 +52,7 @@ async def refresh_cache():
             await get_cached_chats(spam)      # Обновление кэша
         await asyncio.sleep(300)  # Обновляем кэш каждые 5 минут
 
-# Настройка логгирования
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger(__name__)
+# Logging is already configured above with TimedRotatingFileHandler
 
 # Конфигурация
 API_ID = '27734380'
@@ -274,17 +269,28 @@ async def run_spam(_client: Client, message: Message):
                 sent_messages_count += 1
                 logger.info(f"Сообщение отправлено в {chat.id}")
                 await log_to_channel(chat, "Сообщение отправлено")
+                
+                # Monitor chat for activity and resend if needed
+                last_check_time = time.monotonic()
                 while is_spamming:
-                    await asyncio.sleep(5)
-                    messages = await spam.get_messages(chat.id, limit=40)
-                    new_messages = sum(1 for m in messages if not m.out)
-                    if new_messages >= 40:
-                        await rate_limit_check()
-                        await msg.forward_to(chat.id)
-                        sent_messages_count += 1
-                        logger.info(f"Повторная отправка в {chat.id}")
-                        await log_to_channel(chat, "Повторная отправка")
-                    await asyncio.sleep(5)
+                    await asyncio.sleep(10)  # Check every 10 seconds instead of 5
+                    current_time = time.monotonic()
+                    
+                    # Only check for new messages every 60 seconds to avoid spam
+                    if current_time - last_check_time >= 60:
+                        try:
+                            messages = await spam.get_messages(chat.id, limit=40)
+                            new_messages = sum(1 for m in messages if not m.out and m.date.timestamp() > last_check_time)
+                            if new_messages >= 10:  # Reduced threshold to avoid excessive spam
+                                await rate_limiter.acquire()
+                                await msg.forward_to(chat.id)
+                                sent_messages_count += 1
+                                logger.info(f"Повторная отправка в {chat.id}")
+                                await log_to_channel(chat, "Повторная отправка")
+                                last_check_time = current_time
+                        except Exception as e:
+                            logger.error(f"Ошибка при проверке сообщений в чате {chat.id}: {e}")
+                            break  # Exit the loop if we can't check messages
             except FloodWaitError as e:
                 logger.warning(f"Флуд-контроль в чате {chat.id}: ждем {e.seconds} сек.")
                 await asyncio.sleep(e.seconds)
@@ -304,8 +310,18 @@ async def run_spam(_client: Client, message: Message):
                     await handle_error(e, message)
 
         tasks = [asyncio.create_task(send_message_to_chat(chat)) for chat in chats]
-        await asyncio.gather(*tasks)
-    is_spamming = False
+        try:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        except asyncio.CancelledError:
+            logger.info("Spam task was cancelled")
+            # Cancel all remaining tasks
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            # Wait for all tasks to complete cancellation
+            await asyncio.gather(*tasks, return_exceptions=True)
+        finally:
+            is_spamming = False
 
 async def handle_error(error: Exception, message: Message):
     logger.error(str(error))
@@ -332,19 +348,22 @@ async def handle_error(error: Exception, message: Message):
     except Exception as ex:
         logger.error(f"Ошибка при отправке сообщения: {ex}")
 
-if __name__ == "__main__":
+async def init_spam_client():
+    async with SpamClient(SPAM_SESSION, SPAM_API_ID, SPAM_API_HASH) as _:
+        print("Рассыльный аккаунт авторизован!")
+
+async def main():
     print("Бот запущен...")
+    
+    # Инициализируем spam client перед запуском бота
+    await init_spam_client()
+    
+    # Запускаем фоновую задачу обновления кэша
+    asyncio.create_task(refresh_cache())
+    
+    # Запускаем бота
+    await app.start()
+    await app.idle()
 
-    # Новое: Запускаем фоновую задачу обновления кэша при старте бота
-    loop = asyncio.get_event_loop()
-    loop.create_task(refresh_cache())
-
-    # Авторизация бота
-    app.run()
-
-    async def init_spam_client():
-        async with SpamClient(SPAM_SESSION, SPAM_API_ID, SPAM_API_HASH) as _:
-            print("Рассыльный аккаунт авторизован!")
-
-    app.run()
-    asyncio.run(init_spam_client())
+if __name__ == "__main__":
+    asyncio.run(main())
